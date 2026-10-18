@@ -4,10 +4,11 @@ Rewritten with the Airflow 3 TaskFlow API (@dag / @task).
 
 Change 1: TaskFlow API + file paths through XCom (not data).
 Change 2: data validation + branching (train only if data passes checks).
+Change 3: runtime params (set max_k, features, thresholds at trigger time).
 """
 from datetime import datetime, timedelta
 
-from airflow.sdk import dag, task, get_current_context
+from airflow.sdk import dag, task, get_current_context, Param
 
 from src import lab
 
@@ -17,9 +18,14 @@ def _run_dir() -> str:
     return lab.get_run_dir(get_current_context()["run_id"])
 
 
+def _params() -> dict:
+    """Params chosen for this run (defaults, or values from the Trigger form)."""
+    return get_current_context()["params"]
+
+
 @dag(
     dag_id="Airflow_Lab1",
-    description="K-Means clustering pipeline with data validation and branching",
+    description="K-Means clustering pipeline with validation, branching and runtime params",
     start_date=datetime(2026, 1, 15),
     schedule=None,
     catchup=False,
@@ -27,6 +33,16 @@ def _run_dir() -> str:
         "owner": "Hiral Rana",
         "retries": 0,
         "retry_delay": timedelta(minutes=5),
+    },
+    params={
+        "max_k": Param(49, type="integer", minimum=2, maximum=100,
+                       description="Try k = 1..max_k clusters"),
+        "features": Param(lab.DEFAULT_FEATURES, type="array", items={"type": "string"},
+                          description="Columns to cluster on"),
+        "min_rows": Param(100, type="integer", minimum=1,
+                          description="Validation: minimum usable rows"),
+        "max_null_pct": Param(0.2, type="number", minimum=0, maximum=1,
+                              description="Validation: max share of missing values per column"),
     },
     tags=["mlops", "lab1", "kmeans"],
 )
@@ -38,7 +54,13 @@ def airflow_lab1():
 
     @task
     def validate(raw_path: str) -> dict:
-        return lab.validate_data(raw_path, _run_dir())
+        p = _params()
+        return lab.validate_data(
+            raw_path, _run_dir(),
+            features=p["features"],
+            min_rows=p["min_rows"],
+            max_null_pct=p["max_null_pct"],
+        )
 
     @task.branch
     def check_quality(report: dict) -> str:
@@ -57,15 +79,17 @@ def airflow_lab1():
 
     @task
     def preprocess(raw_path: str) -> dict:
-        return lab.data_preprocessing(raw_path, _run_dir())
+        return lab.data_preprocessing(raw_path, _run_dir(), features=_params()["features"])
 
     @task
     def build_model(prep: dict) -> dict:
-        return lab.build_save_model(prep["scaled_path"], _run_dir())
+        return lab.build_save_model(prep["scaled_path"], _run_dir(), max_k=_params()["max_k"])
 
     @task
     def evaluate(model_info: dict) -> int:
-        return lab.load_model_elbow(model_info["model_path"], model_info["sse"])
+        return lab.load_model_elbow(
+            model_info["model_path"], model_info["sse"], features=_params()["features"]
+        )
 
     # ---- Wiring ----
     raw = load_data()

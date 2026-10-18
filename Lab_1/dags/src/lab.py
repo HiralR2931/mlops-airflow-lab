@@ -76,7 +76,7 @@ def build_save_model(scaled_path: str, run_dir: str, max_k: int = 49) -> dict:
     return {"model_path": model_path, "sse": sse}
 
 
-def load_model_elbow(model_path: str, sse: list) -> int:
+def load_model_elbow(model_path: str, sse: list, features=None) -> int:
     """Find the elbow k and predict the cluster of the first test row."""
     with open(model_path, "rb") as f:
         model = pickle.load(f)
@@ -85,7 +85,7 @@ def load_model_elbow(model_path: str, sse: list) -> int:
     print(f"Optimal no. of clusters: {kl.elbow}")
 
     test_df = pd.read_csv(os.path.join(DATA_DIR, "test.csv"))
-    pred = int(model.predict(test_df)[0])
+    pred = int(model.predict(test_df[features or DEFAULT_FEATURES])[0])
     print(f"Predicted cluster for first test row: {pred}")
     return pred
 
