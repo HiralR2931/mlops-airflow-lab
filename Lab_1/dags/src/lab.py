@@ -88,3 +88,52 @@ def load_model_elbow(model_path: str, sse: list) -> int:
     pred = int(model.predict(test_df)[0])
     print(f"Predicted cluster for first test row: {pred}")
     return pred
+
+
+import json
+
+
+def validate_data(raw_path: str, run_dir: str, features=None,
+                  min_rows: int = 100, max_null_pct: float = 0.2) -> dict:
+    """
+    Data quality checks before training. Returns a report dict:
+    {"ok": bool, "issues": [...], "total_rows": n, "usable_rows": n, ...}
+    """
+    features = features or DEFAULT_FEATURES
+    df = pd.read_pickle(raw_path)
+    issues = []
+    usable_rows = 0
+    null_pct = {}
+
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        issues.append(f"Missing columns: {missing}")
+    else:
+        non_numeric = [c for c in features if not pd.api.types.is_numeric_dtype(df[c])]
+        if non_numeric:
+            issues.append(f"Non-numeric columns: {non_numeric}")
+
+        null_pct = {c: round(float(df[c].isna().mean()), 4) for c in features}
+        too_null = {c: p for c, p in null_pct.items() if p > max_null_pct}
+        if too_null:
+            issues.append(f"Too many missing values (> {max_null_pct:.0%}): {too_null}")
+
+        usable_rows = int(len(df.dropna()))
+        if usable_rows < min_rows:
+            issues.append(f"Only {usable_rows} usable rows (need at least {min_rows})")
+
+    report = {
+        "ok": not issues,
+        "issues": issues,
+        "total_rows": int(len(df)),
+        "usable_rows": usable_rows,
+        "null_pct": null_pct,
+        "features": features,
+        "min_rows": min_rows,
+    }
+
+    with open(os.path.join(run_dir, "data_quality_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"Validation {'PASSED' if report['ok'] else 'FAILED'}: {report}")
+    return report
