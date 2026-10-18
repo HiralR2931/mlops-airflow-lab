@@ -1,0 +1,13 @@
+# Airflow runtime files (created when it runs)
+logs/
+config/
+plugins/
+.env
+
+# Trained model output
+**/dags/model/
+
+# Python / Mac junk
+__pycache__/
+*.pyc
+.DS_Store
