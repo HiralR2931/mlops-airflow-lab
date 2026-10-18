@@ -6,13 +6,51 @@ Change 1: TaskFlow API + file paths through XCom (not data).
 Change 2: data validation + branching (train only if data passes checks).
 Change 3: runtime params (set max_k, features, thresholds at trigger time).
 Change 4: parallel fan-out / fan-in + ML fixes (elbow-k model, scaled test data).
+Change 5: reliability - retries with backoff, timeouts, failure/retry callbacks,
+          schedule, max one active run, and a simulate_failure param for testing.
 """
-from datetime import datetime, timedelta
+import json
+import logging
+import os
+from datetime import datetime, timedelta, timezone
 
 from airflow.sdk import dag, task, get_current_context, Param
 
 from src import lab
 
+log = logging.getLogger(__name__)
+ALERTS_LOG = os.path.join(lab.OUTPUT_DIR, "alerts.log")
+
+
+# ---------- callbacks (Change 5) ----------
+
+def _log_event(context, event: str) -> None:
+    """Append one JSON line per retry/failure to output/alerts.log."""
+    ti = context["ti"]
+    record = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "event": event,
+        "dag_id": ti.dag_id,
+        "task_id": ti.task_id,
+        "run_id": ti.run_id,
+        "try_number": ti.try_number,
+        "error": str(context.get("exception")),
+    }
+    os.makedirs(lab.OUTPUT_DIR, exist_ok=True)
+    with open(ALERTS_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    log.warning("ALERT %s: %s", event, record)
+
+
+def on_task_retry(context) -> None:
+    _log_event(context, "RETRY")
+
+
+def on_task_failure(context) -> None:
+    _log_event(context, "FAILED")
+
+
+# ---------- helpers ----------
 
 def _run_dir() -> str:
     """Folder for the current DAG run's intermediate files."""
@@ -26,14 +64,21 @@ def _params() -> dict:
 
 @dag(
     dag_id="Airflow_Lab1",
-    description="K-Means clustering pipeline: validation, branching, params, parallel tasks",
+    description="K-Means clustering pipeline: validation, branching, params, parallel tasks, retries",
     start_date=datetime(2026, 1, 15),
-    schedule=None,
+    schedule="0 6 * * *",                 # daily at 06:00 UTC (manual triggers still work)
     catchup=False,
+    max_active_runs=1,                    # runs never overlap
+    dagrun_timeout=timedelta(minutes=30), # whole run must finish in 30 min
     default_args={
         "owner": "Hiral Rana",
-        "retries": 0,
-        "retry_delay": timedelta(minutes=5),
+        "retries": 2,
+        "retry_delay": timedelta(seconds=15),
+        "retry_exponential_backoff": True,      # 15s, then ~30s, ...
+        "max_retry_delay": timedelta(minutes=5),
+        "execution_timeout": timedelta(minutes=10),
+        "on_retry_callback": on_task_retry,
+        "on_failure_callback": on_task_failure,
     },
     params={
         "max_k": Param(49, type="integer", minimum=2, maximum=100,
@@ -44,6 +89,8 @@ def _params() -> dict:
                           description="Validation: minimum usable rows"),
         "max_null_pct": Param(0.2, type="number", minimum=0, maximum=1,
                               description="Validation: max share of missing values per column"),
+        "simulate_failure": Param(False, type="boolean",
+                                  description="Testing: make load_data fail on its first attempt"),
     },
     tags=["mlops", "lab1", "kmeans"],
 )
@@ -52,6 +99,9 @@ def airflow_lab1():
     # ---------- data ----------
     @task
     def load_data() -> str:
+        ctx = get_current_context()
+        if ctx["params"]["simulate_failure"] and ctx["ti"].try_number == 1:
+            raise RuntimeError("Simulated failure on first attempt (testing retries)")
         return lab.load_data(_run_dir())
 
     @task
