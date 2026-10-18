@@ -1,88 +1,90 @@
+"""
+Data processing and modeling functions for the Airflow Lab 1 pipeline.
+
+Change 1: functions read/write files in a per-run folder and return only
+small values (file paths, numbers). Large data never goes through XCom.
+"""
+import os
+import re
+import pickle
+
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 from kneed import KneeLocator
-import pickle
-import os
-import base64
 
-def load_data():
-    """
-    Loads data from a CSV file, serializes it, and returns the serialized data.
-    Returns:
-        str: Base64-encoded serialized data (JSON-safe).
-    """
-    print("We are here")
-    df = pd.read_csv(os.path.join(os.path.dirname(__file__), "../data/file.csv"))
-    serialized_data = pickle.dumps(df)                    # bytes
-    return base64.b64encode(serialized_data).decode("ascii")  # JSON-safe string
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../dags
+DATA_DIR = os.path.join(BASE_DIR, "data")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-def data_preprocessing(data_b64: str):
-    """
-    Deserializes base64-encoded pickled data, performs preprocessing,
-    and returns base64-encoded pickled clustered data.
-    """
-    # decode -> bytes -> DataFrame
-    data_bytes = base64.b64decode(data_b64)
-    df = pickle.loads(data_bytes)
-
-    df = df.dropna()
-    clustering_data = df[["BALANCE", "PURCHASES", "CREDIT_LIMIT"]]
-
-    min_max_scaler = MinMaxScaler()
-    clustering_data_minmax = min_max_scaler.fit_transform(clustering_data)
-
-    # bytes -> base64 string for XCom
-    clustering_serialized_data = pickle.dumps(clustering_data_minmax)
-    return base64.b64encode(clustering_serialized_data).decode("ascii")
+DEFAULT_FEATURES = ["BALANCE", "PURCHASES", "CREDIT_LIMIT"]
+KMEANS_KWARGS = {"init": "random", "n_init": 10, "max_iter": 300, "random_state": 42}
 
 
-def build_save_model(data_b64: str, filename: str):
-    """
-    Builds a KMeans model on the preprocessed data and saves it.
-    Returns the SSE list (JSON-serializable).
-    """
-    # decode -> bytes -> numpy array
-    data_bytes = base64.b64decode(data_b64)
-    df = pickle.loads(data_bytes)
+def get_run_dir(run_id: str) -> str:
+    """Create (if needed) and return a folder for this DAG run's files."""
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+    run_dir = os.path.join(OUTPUT_DIR, safe_id)
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
 
-    kmeans_kwargs = {"init": "random", "n_init": 10, "max_iter": 300, "random_state": 42}
+
+def load_data(run_dir: str) -> str:
+    """Read the training CSV and save a copy for this run. Returns its path."""
+    df = pd.read_csv(os.path.join(DATA_DIR, "file.csv"))
+    raw_path = os.path.join(run_dir, "raw.pkl")
+    df.to_pickle(raw_path)
+    print(f"Loaded {len(df)} rows -> {raw_path}")
+    return raw_path
+
+
+def data_preprocessing(raw_path: str, run_dir: str, features=None) -> dict:
+    """Drop missing rows, keep feature columns, MinMax-scale. Returns file paths."""
+    features = features or DEFAULT_FEATURES
+    df = pd.read_pickle(raw_path).dropna()
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df[features])
+
+    scaled_path = os.path.join(run_dir, "scaled.pkl")
+    scaler_path = os.path.join(run_dir, "scaler.pkl")
+    with open(scaled_path, "wb") as f:
+        pickle.dump(scaled, f)
+    with open(scaler_path, "wb") as f:
+        pickle.dump(scaler, f)
+
+    print(f"Preprocessed {len(df)} rows using {features}")
+    return {"scaled_path": scaled_path, "scaler_path": scaler_path, "rows": int(len(df))}
+
+
+def build_save_model(scaled_path: str, run_dir: str, max_k: int = 49) -> dict:
+    """Fit KMeans for k = 1..max_k, record SSE, save the last model."""
+    with open(scaled_path, "rb") as f:
+        X = pickle.load(f)
+
     sse = []
-    for k in range(1, 50):
-        kmeans = KMeans(n_clusters=k, **kmeans_kwargs)
-        kmeans.fit(df)
-        sse.append(kmeans.inertia_)
+    for k in range(1, max_k + 1):
+        kmeans = KMeans(n_clusters=k, **KMEANS_KWARGS).fit(X)
+        sse.append(float(kmeans.inertia_))
 
-    # NOTE: This saves the last-fitted model (k=49), matching your original intent.
-    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model")
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, filename)
-    with open(output_path, "wb") as f:
+    # Same behaviour as the original lab: saves the last-fitted model (k = max_k).
+    model_path = os.path.join(run_dir, "model.sav")
+    with open(model_path, "wb") as f:
         pickle.dump(kmeans, f)
 
-    return sse  # list is JSON-safe
+    print(f"Trained k=1..{max_k}, saved model -> {model_path}")
+    return {"model_path": model_path, "sse": sse}
 
 
-def load_model_elbow(filename: str, sse: list):
-    """
-    Loads the saved model and uses the elbow method to report k.
-    Returns the first prediction (as a plain int) for test.csv.
-    """
-    # load the saved (last-fitted) model
-    output_path = os.path.join(os.path.dirname(__file__), "../model", filename)
-    loaded_model = pickle.load(open(output_path, "rb"))
+def load_model_elbow(model_path: str, sse: list) -> int:
+    """Find the elbow k and predict the cluster of the first test row."""
+    with open(model_path, "rb") as f:
+        model = pickle.load(f)
 
-    # elbow for information/logging
-    kl = KneeLocator(range(1, 50), sse, curve="convex", direction="decreasing")
+    kl = KneeLocator(range(1, len(sse) + 1), sse, curve="convex", direction="decreasing")
     print(f"Optimal no. of clusters: {kl.elbow}")
 
-    # predict on raw test data (matches your original code)
-    df = pd.read_csv(os.path.join(os.path.dirname(__file__), "../data/test.csv"))
-    pred = loaded_model.predict(df)[0]
-
-    # ensure JSON-safe return
-    try:
-        return int(pred)
-    except Exception:
-        # if not numeric, still return a JSON-friendly version
-        return pred.item() if hasattr(pred, "item") else pred
+    test_df = pd.read_csv(os.path.join(DATA_DIR, "test.csv"))
+    pred = int(model.predict(test_df)[0])
+    print(f"Predicted cluster for first test row: {pred}")
+    return pred

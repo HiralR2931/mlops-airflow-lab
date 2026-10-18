@@ -11,3 +11,4 @@ plugins/
 __pycache__/
 *.pyc
 .DS_Store
+**/dags/output/

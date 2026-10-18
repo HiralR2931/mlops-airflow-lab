@@ -1,61 +1,56 @@
-# Import necessary libraries and modules
-from airflow import DAG
-# from airflow.operators.python import PythonOperator
-from airflow.providers.standard.operators.python import PythonOperator
+"""
+Airflow Lab 1 - K-Means clustering pipeline.
+Rewritten with the Airflow 3 TaskFlow API (@dag / @task).
+"""
 from datetime import datetime, timedelta
-from src.lab import load_data, data_preprocessing, build_save_model, load_model_elbow
 
-# NOTE:
-# In Airflow 3.x, enabling XCom pickling should be done via environment variable:
-# export AIRFLOW__CORE__ENABLE_XCOM_PICKLING=True
-# The old airflow.configuration API is deprecated.
+from airflow.sdk import dag, task, get_current_context
 
-# Define default arguments for your DAG
-default_args = {
-    'owner': 'Ramin Mohammadi',
-    'start_date': datetime(2026, 1, 15),
-    'retries': 0,  # Number of retries in case of task failure
-    'retry_delay': timedelta(minutes=5),  # Delay before retries
-}
+from src import lab
 
-# Create a DAG instance named 'Airflow_Lab1' with the defined default arguments
-with DAG(
-    'Airflow_Lab1',
-    default_args=default_args,
-    description='Dag example for Lab 1 of Airflow series',
-    catchup=False, 
-) as dag:
 
-    # Task to load data, calls the 'load_data' Python function
-    load_data_task = PythonOperator(
-        task_id='load_data_task',
-        python_callable=load_data,
-    )
+def _run_dir() -> str:
+    """Folder for the current DAG run's intermediate files."""
+    return lab.get_run_dir(get_current_context()["run_id"])
 
-    # Task to perform data preprocessing, depends on 'load_data_task'
-    data_preprocessing_task = PythonOperator(
-        task_id='data_preprocessing_task',
-        python_callable=data_preprocessing,
-        op_args=[load_data_task.output],
-    )
 
-    # Task to build and save a model, depends on 'data_preprocessing_task'
-    build_save_model_task = PythonOperator(
-        task_id='build_save_model_task',
-        python_callable=build_save_model,
-        op_args=[data_preprocessing_task.output, "model.sav"],
-    )
+@dag(
+    dag_id="Airflow_Lab1",
+    description="K-Means clustering pipeline (TaskFlow API version)",
+    start_date=datetime(2026, 1, 15),
+    schedule=None,
+    catchup=False,
+    default_args={
+        "owner": "Hiral Rana",
+        "retries": 0,
+        "retry_delay": timedelta(minutes=5),
+    },
+    tags=["mlops", "lab1", "kmeans"],
+)
+def airflow_lab1():
 
-    # Task to load a model using the 'load_model_elbow' function, depends on 'build_save_model_task'
-    load_model_task = PythonOperator(
-        task_id='load_model_task',
-        python_callable=load_model_elbow,
-        op_args=["model.sav", build_save_model_task.output],
-    )
+    @task
+    def load_data() -> str:
+        return lab.load_data(_run_dir())
 
-    # Set task dependencies
-    load_data_task >> data_preprocessing_task >> build_save_model_task >> load_model_task
+    @task
+    def preprocess(raw_path: str) -> dict:
+        return lab.data_preprocessing(raw_path, _run_dir())
 
-# If this script is run directly, allow command-line interaction with the DAG
+    @task
+    def build_model(prep: dict) -> dict:
+        return lab.build_save_model(prep["scaled_path"], _run_dir())
+
+    @task
+    def evaluate(model_info: dict) -> int:
+        return lab.load_model_elbow(model_info["model_path"], model_info["sse"])
+
+    # Calling the tasks like functions sets the order automatically:
+    # load_data -> preprocess -> build_model -> evaluate
+    evaluate(build_model(preprocess(load_data())))
+
+
+dag = airflow_lab1()
+
 if __name__ == "__main__":
     dag.test()
