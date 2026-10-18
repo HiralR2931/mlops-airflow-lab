@@ -5,6 +5,7 @@ Rewritten with the Airflow 3 TaskFlow API (@dag / @task).
 Change 1: TaskFlow API + file paths through XCom (not data).
 Change 2: data validation + branching (train only if data passes checks).
 Change 3: runtime params (set max_k, features, thresholds at trigger time).
+Change 4: parallel fan-out / fan-in + ML fixes (elbow-k model, scaled test data).
 """
 from datetime import datetime, timedelta
 
@@ -25,7 +26,7 @@ def _params() -> dict:
 
 @dag(
     dag_id="Airflow_Lab1",
-    description="K-Means clustering pipeline with validation, branching and runtime params",
+    description="K-Means clustering pipeline: validation, branching, params, parallel tasks",
     start_date=datetime(2026, 1, 15),
     schedule=None,
     catchup=False,
@@ -48,6 +49,7 @@ def _params() -> dict:
 )
 def airflow_lab1():
 
+    # ---------- data ----------
     @task
     def load_data() -> str:
         return lab.load_data(_run_dir())
@@ -55,12 +57,8 @@ def airflow_lab1():
     @task
     def validate(raw_path: str) -> dict:
         p = _params()
-        return lab.validate_data(
-            raw_path, _run_dir(),
-            features=p["features"],
-            min_rows=p["min_rows"],
-            max_null_pct=p["max_null_pct"],
-        )
+        return lab.validate_data(raw_path, _run_dir(), features=p["features"],
+                                 min_rows=p["min_rows"], max_null_pct=p["max_null_pct"])
 
     @task.branch
     def check_quality(report: dict) -> str:
@@ -81,15 +79,44 @@ def airflow_lab1():
     def preprocess(raw_path: str) -> dict:
         return lab.data_preprocessing(raw_path, _run_dir(), features=_params()["features"])
 
+    # ---------- modeling ----------
     @task
-    def build_model(prep: dict) -> dict:
-        return lab.build_save_model(prep["scaled_path"], _run_dir(), max_k=_params()["max_k"])
+    def compute_sse(prep: dict) -> list:
+        return lab.compute_sse(prep["scaled_path"], max_k=_params()["max_k"])
 
     @task
-    def evaluate(model_info: dict) -> int:
-        return lab.load_model_elbow(
-            model_info["model_path"], model_info["sse"], features=_params()["features"]
-        )
+    def find_best_k(sse: list) -> int:
+        return lab.find_best_k(sse)
+
+    @task
+    def train_final_model(prep: dict, k: int) -> str:
+        return lab.train_final_model(prep["scaled_path"], _run_dir(), k)
+
+    # ---------- parallel outputs (fan-out) ----------
+    @task
+    def predict_test(model_path: str, prep: dict) -> dict:
+        return lab.predict_test(model_path, prep["scaler_path"], _run_dir(),
+                                features=_params()["features"])
+
+    @task
+    def write_report(model_path: str, prep: dict, sse: list, k: int) -> str:
+        return lab.write_report(model_path, prep["scaler_path"], _run_dir(),
+                                sse, k, features=_params()["features"])
+
+    # ---------- join (fan-in) ----------
+    @task
+    def summary(preds: dict, report_path: str, k: int) -> dict:
+        result = {
+            "best_k": k,
+            "test_rows_predicted": preds["n_rows"],
+            "first_test_prediction": preds["first_prediction"],
+            "predictions_file": preds["predictions_path"],
+            "report_file": report_path,
+        }
+        print("=== Pipeline summary ===")
+        for key, value in result.items():
+            print(f"{key}: {value}")
+        return result
 
     # ---- Wiring ----
     raw = load_data()
@@ -98,11 +125,16 @@ def airflow_lab1():
 
     prep = preprocess(raw)
     bad = report_bad_data(report)
+    decision >> [prep, bad]          # branch: only one path runs
 
-    # The branch picks ONE of these two paths
-    decision >> [prep, bad]
+    sse = compute_sse(prep)
+    k = find_best_k(sse)
+    model_path = train_final_model(prep, k)
 
-    evaluate(build_model(prep))
+    preds = predict_test(model_path, prep)               # these two run
+    report_path = write_report(model_path, prep, sse, k)  # in parallel
+
+    summary(preds, report_path, k)                       # waits for both
 
 
 dag = airflow_lab1()
