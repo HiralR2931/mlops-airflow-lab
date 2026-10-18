@@ -10,11 +10,11 @@ This is my modified version of the course's Airflow Lab 1. The original was a st
 
 **Before:** the original lab, a straight line of 4 tasks.
 
-![Original 4-task pipeline](assets/before_graph.png)
+![Original 4-task pipeline](Lab_1/assets/before_graph.png)
 
 **After:** my version, 11 tasks with validation, a branch, and parallel outputs.
 
-![New 11-task pipeline](assets/pipeline_structure.png)
+![New 11-task pipeline](Lab_1/assets/pipeline_structure.png)
 
 | | Original | My version |
 |---|---|---|
@@ -53,7 +53,7 @@ load_data → validate → check_quality (branch) ┤
 | `write_report` | Writes `report.md` with cluster sizes and centers (runs **in parallel** with `predict_test`) |
 | `summary` | Waits for both, then prints a run summary |
 
-![Successful run – Graph view](assets/graph_success.png)
+![Successful run – Graph view](Lab_1/assets/graph_success.png)
 
 ---
 
@@ -81,7 +81,7 @@ All changes are to the Airflow DAG and how tasks work together. Each one is a se
 - `validate` checks: required columns exist, they are numeric, no column has more than `max_null_pct` missing values, and at least `min_rows` usable rows remain. The result is saved to `data_quality_report.json`.
 - `check_quality` is a `@task.branch` that returns the next task to run. If the data passed, training runs and `report_bad_data` is **skipped**. If it failed, `report_bad_data` runs and the whole training path is **skipped**, so a model is never trained on bad data.
 
-![Bad data – training path skipped](assets/branch_bad_data.png)
+![Bad data – training path skipped](Lab_1/assets/branch_bad_data.png)
 
 ### 3. Runtime params
 
@@ -95,7 +95,7 @@ Settings can be changed when triggering the DAG, with no code edits:
 | `max_null_pct` | `0.2` | Validation: max share of missing values per column |
 | `simulate_failure` | `false` | Testing: makes `load_data` fail on its first attempt |
 
-![Trigger form with params](assets/trigger_params.png)
+![Trigger form with params](Lab_1/assets/trigger_params.png)
 
 ### 4. Parallel tasks + ML fixes
 
@@ -104,7 +104,7 @@ Settings can be changed when triggering the DAG, with no code edits:
 - **Bug fix 1:** the original saved the **last** model it fitted (k = 49) and ignored the elbow result. Now the final model is trained **at the elbow k**.
 - **Bug fix 2:** the original trained on scaled data but predicted on **unscaled** test data. Now `predict_test` applies the **saved scaler** first.
 
-![Gantt – predict_test and write_report overlap](assets/gantt_parallel.png)
+![Gantt – predict_test and write_report overlap](Lab_1/assets/gantt_parallel.png)
 
 ### 5. Reliability
 
@@ -118,15 +118,15 @@ Settings can be changed when triggering the DAG, with no code edits:
 | `on_retry_callback` / `on_failure_callback` | – | Writes a JSON line to `dags/output/alerts.log` for every retry or failure |
 | `schedule` | `0 6 * * *` | Runs daily at 06:00 UTC; manual triggers still work |
 
-![Retry – load_data succeeded on try 2](assets/retry.png)
+![Retry – load_data succeeded on try 2](Lab_1/assets/retry.png)
 
 ---
 
 ## Project structure
 
 ```
+mlops-airflow-lab/   (README.md is at the repo root)
 Lab_1/
-├── README.md               ← this file
 ├── setup.sh                ← one-time setup script
 ├── docker-compose.yaml     ← Airflow 3.3.2 services (official file, 2 settings changed)
 ├── assets/                 ← screenshots used in this README
